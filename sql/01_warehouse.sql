@@ -1,0 +1,5 @@
+-- Warehouse ENRICHMENT_WH is managed by Terraform in the datawarehouse repo:
+--   terraform/_locals.tf       → local.warehouses.enrichment_wh
+--   terraform/warehouses.tf    → module "warehouses"
+-- Do not create or alter it here. Run `terraform apply` in the datawarehouse repo
+-- to provision or update it.

@@ -1,3 +1,5 @@
+USE ROLE llm_enrichment_role;
+USE WAREHOUSE enrichment_wh;
 USE SCHEMA datalake.llm_enrichments;
 
 -- Upload the package as a zip before running this.

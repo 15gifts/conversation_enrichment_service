@@ -1,4 +1,18 @@
+-- ---------------------------------------------------------------------------
+-- ROLE CONTEXT NOTE
+-- CREATE NETWORK RULE, CREATE SECRET, and CREATE EXTERNAL ACCESS INTEGRATION
+-- require ACCOUNTADMIN (or a role granted CREATE INTEGRATION privilege at the
+-- account level). Switch to ACCOUNTADMIN for the DDL blocks below, then switch
+-- back to llm_enrichment_role for the GRANT statements at the bottom.
+--
+--   Step 1: run as ACCOUNTADMIN
+USE ROLE accountadmin;
+USE WAREHOUSE enrichment_wh;
 USE SCHEMA datalake.llm_enrichments;
+--
+--   Step 2: after the GRANTs, optionally switch back:
+--   USE ROLE llm_enrichment_role;
+-- ---------------------------------------------------------------------------
 
 -- ---------------------------------------------------------------------------
 -- Azure OpenAI API key secret (placeholder)

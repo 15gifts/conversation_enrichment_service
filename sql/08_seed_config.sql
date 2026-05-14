@@ -6,6 +6,8 @@
 -- SUBMIT_BATCH_TASK / RETRIEVE_BATCH_TASK to pass the new version string.
 -- Old rows are preserved for historical enrichment traceability.
 
+USE ROLE llm_enrichment_role;
+USE WAREHOUSE enrichment_wh;
 USE SCHEMA datalake.llm_enrichments;
 
 -- ---------------------------------------------------------------------------

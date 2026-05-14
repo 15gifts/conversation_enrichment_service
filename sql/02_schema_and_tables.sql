@@ -2,6 +2,8 @@
 --   terraform/schemas.tf  →  resource "snowflake_schema" "llm_enrichments"
 -- Run `terraform apply` in the datawarehouse repo before running this script.
 
+USE ROLE llm_enrichment_role;
+USE WAREHOUSE enrichment_wh;
 USE SCHEMA datalake.llm_enrichments;
 
 -- ---------------------------------------------------------------------------

@@ -1,3 +1,5 @@
+USE ROLE llm_enrichment_role;
+USE WAREHOUSE enrichment_wh;
 USE SCHEMA datalake.llm_enrichments;
 
 -- ---------------------------------------------------------------------------

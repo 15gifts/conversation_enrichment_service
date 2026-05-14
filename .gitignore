@@ -1,0 +1,44 @@
+# --- Local-only configuration --------------------------------------------
+CLAUDE.local.md
+.claude/
+.env
+.env.local
+*.env
+
+# --- Python bytecode / caches --------------------------------------------
+__pycache__/
+*.pyc
+*.pyo
+
+# --- Virtual environments ------------------------------------------------
+.venv/
+venv/
+
+# --- Linter / test / type-checker caches ---------------------------------
+.ruff_cache/
+.pytest_cache/
+.mypy_cache/
+
+# --- Test coverage outputs -----------------------------------------------
+.coverage
+.coverage.*
+htmlcov/
+
+# --- Python packaging artefacts ------------------------------------------
+dist/
+build/
+*.egg-info/
+
+# --- Deploy artefacts (rebuild from source each time) --------------------
+batch_enrichment.zip
+
+# --- dbt -----------------------------------------------------------------
+target/
+dbt_packages/
+logs/
+
+# --- OS / editor noise ---------------------------------------------------
+.DS_Store
+**/.DS_Store
+.idea/
+.vscode/

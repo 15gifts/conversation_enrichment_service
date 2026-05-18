@@ -34,9 +34,10 @@ ENRICHMENT_QUEUE view  ←── excludes already-enriched or in-flight rows
 SUBMIT_BATCH_TASK (every N hours)
    └── SUBMIT_BATCH_SP
        ├── Reads queue, serialises as JSONL
+       ├── Writes to BATCH_ROW_MAPPING
        ├── Uploads to Azure OpenAI Files API
        ├── Submits batch job
-       └── Writes to BATCH_TRACKING + BATCH_ROW_MAPPING (before API call)
+       └── Writes to BATCH_TRACKING (after Azure returns batch ID)
         │
         ▼  (Azure processes — up to 24 h)
         │

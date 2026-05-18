@@ -144,14 +144,14 @@ Run these in numbered order on first deployment and after schema changes.
 | File | Purpose |
 |---|---|
 | [01_warehouse.sql](sql/01_warehouse.sql) | Warehouse definition (managed by Terraform — do not edit directly) |
-| [02_schema_and_tables.sql](sql/02_schema_and_tables.sql) | Creates `BATCH_TRACKING`, `BATCH_ROW_MAPPING`, `ENRICHMENT_RESULTS`, `ENRICHMENT_FIELD_CONFIG` |
+| [02_schema_and_tables.sql](sql/02_schema_and_tables.sql) | Creates `BATCH_TRACKING`, `BATCH_ROW_MAPPING`, `ENRICHMENT_RESULTS`, `ENRICHMENT_FIELD_CONFIG`, `ENRICHMENT_CONTEXT_CONFIG` |
 | [03_views.sql](sql/03_views.sql) | `ENRICHMENT_QUEUE` (unenriched, non-in-flight rows) and state machine views |
 | [04_security.sql](sql/04_security.sql) | Role, Secret, Network Rule, External Access Integration |
 | [05_submit_procedure.sql](sql/05_submit_procedure.sql) | `SUBMIT_BATCH_SP` — Snowpark Python stored procedure for submission |
 | [05a_stage.sql](sql/05a_stage.sql) | Internal stage for Python zips and Streamlit dashboard files |
 | [06_retrieve_procedure.sql](sql/06_retrieve_procedure.sql) | `RETRIEVE_BATCH_SP` — Snowpark Python stored procedure for retrieval |
 | [07_tasks.sql](sql/07_tasks.sql) | `SUBMIT_BATCH_TASK` (every 2 h) and `RETRIEVE_BATCH_TASK` (every 30 m) |
-| [08_seed_config.sql](sql/08_seed_config.sql) | Seeds `ENRICHMENT_FIELD_CONFIG` for prompt v1.0 (9 output fields) |
+| [08_seed_config.sql](sql/08_seed_config.sql) | Seeds `ENRICHMENT_FIELD_CONFIG` and `ENRICHMENT_CONTEXT_CONFIG` for prompt v1.0 (9 output fields) |
 
 ### Documentation
 

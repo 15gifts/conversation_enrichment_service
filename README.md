@@ -218,10 +218,11 @@ uv sync
 
 ### Updating stored procedures
 
-The Snowpark procedures in `05_submit_procedure.sql` and `06_retrieve_procedure.sql` embed the Python source inline. After changing Python code in `src/batch_enrichment/`:
+The Snowpark procedures in `05_submit_procedure.sql` and `06_retrieve_procedure.sql` import `@batch_enrichment_stage/batch_enrichment.zip` rather than embedding the Python source inline. After changing Python code in `src/batch_enrichment/`:
 
-1. Re-run the relevant SQL file to replace the procedure definition.
-2. There is no separate build step — the SQL file is the deployment artefact.
+1. Rebuild `batch_enrichment.zip` from the updated Python source.
+2. Upload the rebuilt zip to `@batch_enrichment_stage/batch_enrichment.zip`.
+3. Re-run the relevant SQL file to replace the procedure definition so Snowflake uses the updated package.
 
 ### Enabling tasks
 
@@ -237,8 +238,8 @@ ALTER TASK RETRIEVE_BATCH_TASK RESUME;
 ## Running locally
 
 ```bash
-# Install dependencies
-uv sync
+# Install dependencies (including dev tools used below)
+uv sync --extra dev
 
 # Run unit tests
 uv run pytest tests/unit/
@@ -281,10 +282,10 @@ The SQL queries backing each panel are documented in [monitoring.md](monitoring.
 | Situation | Reference |
 |---|---|
 | Queue is growing faster than it drains | [backlog_management_runbook.md](backlog_management_runbook.md) — adjust `CHUNK_SIZE` or `MAX_ACTIVE_BATCHES` |
-| A batch is stuck in `IN_PROGRESS` for >26 h | [failure_mode_test_plan.md](failure_mode_test_plan.md) — stuck batch recovery section |
-| Tasks are suspended unexpectedly | Inspect `TASK_HISTORY` in Snowflake; check `RETRIEVE_BATCH_TASK` predecessor dependency |
+| A batch is stuck in `IN_PROGRESS` for >26 h | [backlog_management_runbook.md](backlog_management_runbook.md) — see “Resetting a stuck batch (operational)” |
+| Tasks are suspended unexpectedly | Inspect `TASK_HISTORY` in Snowflake; verify `RETRIEVE_BATCH_TASK` schedule, state, and recent errors |
 | Azure API returns 429 / rate limit | Check `next_retry_after` in `BATCH_TRACKING`; procedure uses exponential backoff automatically |
-| Malformed LLM responses | Check `ENRICHMENT_RESULTS` for `outcome = 'PARSE_ERROR'`; raw output is logged for diagnosis |
+| Malformed LLM responses | Check `ENRICHMENT_RESULTS` for rows where `parse_error` is populated (and review `failure_reason` as needed); raw output is logged for diagnosis |
 | Want to run a manual end-to-end test | [smoke_test_instructions.md](smoke_test_instructions.md) |
 
 ---
@@ -293,11 +294,11 @@ The SQL queries backing each panel are documented in [monitoring.md](monitoring.
 
 Eight constraints govern all changes to this codebase. Violating any of them risks data loss, double-processing, or corrupted analytics.
 
-1. **Idempotency** — Check `BATCH_TRACKING` for `IN_PROGRESS` batches before submitting. Write `BATCH_ROW_MAPPING` **before** calling the Azure API, not after.
+1. **Idempotency** — Treat `SUBMITTING`, `SUBMITTED`, and `IN_PROGRESS` as active batches in `BATCH_TRACKING`, and do not resubmit rows that already have `BATCH_ROW_MAPPING` entries in `PENDING`, `SUBMITTING`, `SUBMITTED`, or `IN_PROGRESS`. Write `BATCH_ROW_MAPPING` **before** calling the Azure API, not after.
 2. **No orphaned batches** — If the procedure crashes post-API-call but pre-tracking-write, the mapping table prevents resubmission of the same rows.
 3. **Per-row failure handling** — `status=completed` from Azure does not mean every row succeeded. Parse the `error` field per row.
 4. **Prompt versioning** — `prompt_version` is stored in `BATCH_TRACKING` and propagated to `ENRICHMENT_RESULTS`. Changing the prompt schema requires a version bump and a new seed in `08_seed_config.sql`.
-5. **Stream, don't load** — Large output JSONL files are streamed in 64 KB chunks to avoid Snowpark memory limits.
+5. **Prefer true streaming over buffering** — Reading Azure output in 64 KB HTTP chunks does **not** by itself avoid Snowpark memory limits if those chunks are appended, joined, and parsed as one JSONL string. Treat retrieval as memory-bound until parsing is incremental end-to-end.
 6. **Exponential backoff** — Use `next_retry_after` on `BATCH_TRACKING` rows. Never retry aggressively.
 7. **Temperature = 0, `response_format = json_object`** — Handle `PARSE_ERROR` gracefully regardless; log raw output and don't block the batch.
 8. **No LLM calls from dbt** — dbt owns transformation only. All Azure API calls live in stored procedures.

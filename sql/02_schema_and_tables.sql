@@ -22,6 +22,13 @@ CREATE TABLE IF NOT EXISTS batch_tracking (
     total_chunks         INTEGER,
     model_deployment     VARCHAR,
     prompt_version       VARCHAR,
+    -- config_loaded_at: SCD2 timestamp captured from the datawarehouse _act
+    -- satellites at submit time (max load_datetime across
+    -- sat_google_sheets__enrichment_field_config_act and
+    -- sat_google_sheets__enrichment_context_config_act). Identifies the exact
+    -- config snapshot used for this batch; reproduce via the `_hist AS OF`
+    -- query in docs/maintenance.md.
+    config_loaded_at     TIMESTAMP_NTZ,
     submitted_at         TIMESTAMP_NTZ,
     completed_at         TIMESTAMP_NTZ,
     failed_at            TIMESTAMP_NTZ,
@@ -47,40 +54,13 @@ CREATE TABLE IF NOT EXISTS batch_row_mapping (
     CONSTRAINT pk_batch_row_mapping PRIMARY KEY (conversation_id, batch_tracking_id)
 );
 
--- ---------------------------------------------------------------------------
--- enrichment_field_config: defines LLM output fields per prompt version.
--- Drives both the system prompt (schema block + rules) and response validation.
--- Add a row per field per config_version — no code changes required.
--- ---------------------------------------------------------------------------
-CREATE TABLE IF NOT EXISTS enrichment_field_config (
-    config_version    VARCHAR       NOT NULL,   -- matches prompt_version in batch_tracking
-    field_name        VARCHAR       NOT NULL,   -- JSON key returned by the LLM
-    field_type        VARCHAR       NOT NULL,   -- string_enum | boolean | integer_range
-                                                -- | string | string_array | enum_array
-    allowed_values    ARRAY,                    -- for string_enum / enum_array: valid values
-    min_value         INTEGER,                  -- for integer_range: inclusive lower bound
-    max_value         INTEGER,                  -- for integer_range: inclusive upper bound
-    field_description VARCHAR       NOT NULL,   -- included verbatim in the prompt rules block
-    is_nullable       BOOLEAN       NOT NULL DEFAULT FALSE,
-    display_order     INTEGER       NOT NULL,   -- controls JSON schema ordering in the prompt
-    created_at        TIMESTAMP_NTZ NOT NULL DEFAULT CURRENT_TIMESTAMP(),
-    CONSTRAINT pk_enrichment_field_config PRIMARY KEY (config_version, field_name)
-);
-
--- ---------------------------------------------------------------------------
--- enrichment_context_config: defines additional context columns to include
--- in the LLM user message (e.g. outcome signals like sale, exit_to_purchase).
--- Columns must exist in the enrichment_queue view.
--- ---------------------------------------------------------------------------
-CREATE TABLE IF NOT EXISTS enrichment_context_config (
-    config_version    VARCHAR       NOT NULL,
-    column_name       VARCHAR       NOT NULL,   -- column name in enrichment_queue view
-    display_label     VARCHAR       NOT NULL,   -- label shown to the LLM in the user message
-    value_description VARCHAR,                  -- optional explanation appended to the label
-    display_order     INTEGER       NOT NULL,
-    created_at        TIMESTAMP_NTZ NOT NULL DEFAULT CURRENT_TIMESTAMP(),
-    CONSTRAINT pk_enrichment_context_config PRIMARY KEY (config_version, column_name)
-);
+-- Config tables (enrichment_field_config, enrichment_context_config) are no
+-- longer defined here. They are now sourced from Google Sheets via Fivetran,
+-- routed through the datawarehouse Data Vault, and exposed as:
+--   datawarehouse.<schema>.sat_google_sheets__enrichment_field_config_act
+--   datawarehouse.<schema>.sat_google_sheets__enrichment_context_config_act
+-- The stored procedures read these _act satellites directly. See
+-- docs/maintenance.md for the historical-config reproducibility query.
 
 -- ---------------------------------------------------------------------------
 -- enrichment_results: parsed LLM output per conversation.
@@ -104,6 +84,10 @@ CREATE TABLE IF NOT EXISTS enrichment_results (
     -- Values: 'guardrail' | 'azure_error' | 'parse_error' | NULL (success)
     failure_reason      VARCHAR,
     batch_tracking_id   VARCHAR                        NOT NULL,
+    -- config_loaded_at: propagated from batch_tracking; identifies the config
+    -- snapshot used to produce this row. Reproduce the exact config via
+    -- docs/maintenance.md.
+    config_loaded_at    TIMESTAMP_NTZ,
     enriched_at         TIMESTAMP_NTZ   DEFAULT CURRENT_TIMESTAMP()  NOT NULL,
     CONSTRAINT pk_enrichment_results PRIMARY KEY (enrichment_id)
 );

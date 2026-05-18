@@ -44,6 +44,10 @@ _FIELD_CONFIG_ROWS = [
     },
 ]
 
+# Canned max(load_datetime) across the two _act satellites — the value
+# returned by _fetch_config_loaded_at and stamped on the batch_tracking row.
+_CONFIG_LOADED_AT = "2026-05-18 12:34:56.000"
+
 
 # ---------------------------------------------------------------------------
 # Fake Snowflake session
@@ -78,9 +82,12 @@ class _FakeSession:
         q = self._last_query.upper()
         if "COUNT(*)" in q and "BATCH_TRACKING" in q:
             return [_FakeRow({"N": self.active_batch_count})]
-        if "ENRICHMENT_FIELD_CONFIG" in q:
+        # GREATEST query references both _act tables; must match first.
+        if "GREATEST" in q and "MAX(LOAD_DATETIME)" in q:
+            return [_FakeRow({"CONFIG_LOADED_AT": _CONFIG_LOADED_AT})]
+        if "SAT_GOOGLE_SHEETS__ENRICHMENT_FIELD_CONFIG_ACT" in q:
             return [_FakeRow(row) for row in _FIELD_CONFIG_ROWS]
-        if "ENRICHMENT_CONTEXT_CONFIG" in q:
+        if "SAT_GOOGLE_SHEETS__ENRICHMENT_CONTEXT_CONFIG_ACT" in q:
             return []  # no context columns in submit tests
         if "ENRICHMENT_QUEUE" in q:
             return [
@@ -293,3 +300,147 @@ def _find_idx(sql_log: list[str], *tokens: str) -> int | None:
         if all(t.upper() in upper for t in tokens):
             return i
     return None
+
+
+class TestConfigSourceMigration:
+    """Verifies the migration from datalake.llm_enrichments config tables to
+    datawarehouse _act satellites (ticket configure_config_sheet)."""
+
+    @responses_lib.activate
+    def test_field_config_reads_from_act_satellite_without_version_filter(self) -> None:
+        responses_lib.add(
+            responses_lib.POST,
+            "https://test.openai.azure.com/openai/files",
+            json={"id": "file-abc"},
+            status=200,
+        )
+        responses_lib.add(
+            responses_lib.POST,
+            "https://test.openai.azure.com/openai/batches",
+            json={"id": "batch-xyz"},
+            status=200,
+        )
+
+        session = _FakeSession(queue_rows=make_queue_rows(2))
+        submit_batch(session, make_config())
+
+        field_query_idx = _find_idx(
+            session.sql_log, "SAT_GOOGLE_SHEETS__ENRICHMENT_FIELD_CONFIG_ACT"
+        )
+        assert field_query_idx is not None, "field config query did not target _act satellite"
+
+        field_query = session.sql_log[field_query_idx].upper()
+        # Old behaviour filtered by config_version; new behaviour reads the
+        # whole satellite (history lives in _hist; _act is current state).
+        assert "CONFIG_VERSION" not in field_query
+        assert "WHERE" not in field_query or "CONFIG_VERSION" not in field_query
+
+        # The legacy table name must not appear anywhere in the submit path.
+        assert _find_idx(session.sql_log, "ENRICHMENT_FIELD_CONFIG ") is None or all(
+            "SAT_GOOGLE_SHEETS__ENRICHMENT_FIELD_CONFIG_ACT" in q.upper()
+            for q in session.sql_log
+            if "ENRICHMENT_FIELD_CONFIG" in q.upper()
+        )
+
+    @responses_lib.activate
+    def test_context_config_reads_from_act_satellite_without_version_filter(self) -> None:
+        responses_lib.add(
+            responses_lib.POST,
+            "https://test.openai.azure.com/openai/files",
+            json={"id": "file-abc"},
+            status=200,
+        )
+        responses_lib.add(
+            responses_lib.POST,
+            "https://test.openai.azure.com/openai/batches",
+            json={"id": "batch-xyz"},
+            status=200,
+        )
+
+        session = _FakeSession(queue_rows=make_queue_rows(2))
+        submit_batch(session, make_config())
+
+        ctx_query_idx = _find_idx(
+            session.sql_log, "SAT_GOOGLE_SHEETS__ENRICHMENT_CONTEXT_CONFIG_ACT"
+        )
+        assert ctx_query_idx is not None, "context config query did not target _act satellite"
+        assert "CONFIG_VERSION" not in session.sql_log[ctx_query_idx].upper()
+
+    @responses_lib.activate
+    def test_config_loaded_at_query_combines_both_act_satellites(self) -> None:
+        responses_lib.add(
+            responses_lib.POST,
+            "https://test.openai.azure.com/openai/files",
+            json={"id": "file-abc"},
+            status=200,
+        )
+        responses_lib.add(
+            responses_lib.POST,
+            "https://test.openai.azure.com/openai/batches",
+            json={"id": "batch-xyz"},
+            status=200,
+        )
+
+        session = _FakeSession(queue_rows=make_queue_rows(2))
+        submit_batch(session, make_config())
+
+        idx = _find_idx(session.sql_log, "GREATEST", "MAX(LOAD_DATETIME)")
+        assert idx is not None, "no GREATEST(MAX(load_datetime)...) query was issued"
+        q = session.sql_log[idx].upper()
+        assert "SAT_GOOGLE_SHEETS__ENRICHMENT_FIELD_CONFIG_ACT" in q
+        assert "SAT_GOOGLE_SHEETS__ENRICHMENT_CONTEXT_CONFIG_ACT" in q
+
+    @responses_lib.activate
+    def test_tracking_insert_carries_config_loaded_at(self) -> None:
+        responses_lib.add(
+            responses_lib.POST,
+            "https://test.openai.azure.com/openai/files",
+            json={"id": "file-abc"},
+            status=200,
+        )
+        responses_lib.add(
+            responses_lib.POST,
+            "https://test.openai.azure.com/openai/batches",
+            json={"id": "batch-xyz"},
+            status=200,
+        )
+
+        session = _FakeSession(queue_rows=make_queue_rows(2))
+        submit_batch(session, make_config())
+
+        idx = _find_idx(session.sql_log, "INSERT INTO", "DATALAKE.LLM_ENRICHMENTS.BATCH_TRACKING")
+        assert idx is not None, "no batch_tracking INSERT was issued"
+        tracking_sql = session.sql_log[idx]
+        assert "config_loaded_at" in tracking_sql.lower(), (
+            "config_loaded_at column missing from batch_tracking INSERT"
+        )
+        assert _CONFIG_LOADED_AT in tracking_sql, (
+            "config_loaded_at value not stamped on the tracking row"
+        )
+
+    @responses_lib.activate
+    def test_config_loaded_at_fetched_before_azure_calls(self) -> None:
+        responses_lib.add(
+            responses_lib.POST,
+            "https://test.openai.azure.com/openai/files",
+            json={"id": "file-abc"},
+            status=200,
+        )
+        responses_lib.add(
+            responses_lib.POST,
+            "https://test.openai.azure.com/openai/batches",
+            json={"id": "batch-xyz"},
+            status=200,
+        )
+
+        session = _FakeSession(queue_rows=make_queue_rows(2))
+        submit_batch(session, make_config())
+
+        # The fetch must happen before the Azure POSTs so the value is known
+        # when the tracking row is inserted on Azure success.
+        config_idx = _find_idx(session.sql_log, "GREATEST", "MAX(LOAD_DATETIME)")
+        tracking_idx = _find_idx(
+            session.sql_log, "INSERT INTO", "DATALAKE.LLM_ENRICHMENTS.BATCH_TRACKING"
+        )
+        assert config_idx is not None and tracking_idx is not None
+        assert config_idx < tracking_idx

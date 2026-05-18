@@ -172,18 +172,17 @@ Run these in numbered order on first deployment and after schema changes.
 
 | Object | Type | Purpose |
 |---|---|---|
-| `RAW_TRANSCRIPTS` | Table | Landing zone for raw conversational data |
-| `STG_CONVERSATIONS` | View (dbt) | Cleaned, deduplicated transcripts |
+| `prd_analytics.info_general.fact_conversation_messages` | Table | Source conversation-message fact table read directly by the queue DDL |
 | `ENRICHMENT_QUEUE` | View | Unenriched rows eligible for submission |
 | `BATCH_TRACKING` | Table | Central state machine — one row per Azure batch job |
 | `BATCH_ROW_MAPPING` | Table | Maps `conversation_id` → batch; idempotency guard |
-| `ENRICHMENT_RESULTS` | Table | Parsed LLM output (sentiment, intent, topics, resolution, summary) |
+| `ENRICHMENT_RESULTS` | Table | Parsed LLM output in `parsed_fields` (for example `conversation_summary`, `engagement_trajectory`, `friction_types`, `purchase_readiness_reached`) |
 | `ENRICHMENT_FIELD_CONFIG` | Table | Defines LLM output schema per `prompt_version` |
 | `SUBMIT_BATCH_TASK` | Task | Fires every 2 h (`CRON 0 */2 * * * UTC`) |
 | `RETRIEVE_BATCH_TASK` | Task | Fires every 30 m (`CRON */30 * * * * UTC`) |
 | `SUBMIT_BATCH_SP` | Stored Procedure | Submission logic (Snowpark Python) |
 | `RETRIEVE_BATCH_SP` | Stored Procedure | Retrieval and parsing logic (Snowpark Python) |
-| `AZURE_OPENAI_SECRET` | Secret | Azure OpenAI API key |
+| `azure_openai_key` | Secret | Azure OpenAI API key |
 | `AZURE_OPENAI_NETWORK_RULE` | Network Rule | Restricts egress to the configured Azure endpoint |
 | `AZURE_OPENAI_EAI` | External Access Integration | Binds Network Rule + Secret to stored procedures |
 | `INT_CONVERSATIONS_ENRICHED` | dbt model (downstream) | Joins enrichment results to conversations |

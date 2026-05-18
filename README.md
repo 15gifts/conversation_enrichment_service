@@ -56,8 +56,8 @@ dbt (datawarehouse repo)
 ```
 
 State transitions: `PENDING → SUBMITTING → SUBMITTED → IN_PROGRESS → COMPLETED`  
-Failure path: `→ FAILED → RETRYING → SUBMITTED`  
-Terminal failure: `→ PERMANENTLY_FAILED`
+Failure path: `→ FAILED`  
+Note: automatic transitions to `RETRYING` or `PERMANENTLY_FAILED` are not currently implemented in this service; failed batches require manual or external handling if they need to be retried or marked terminal.
 
 ---
 

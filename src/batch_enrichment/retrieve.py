@@ -13,6 +13,11 @@ from batch_enrichment.response_parser import parse_batch_lines
 logger = logging.getLogger(__name__)
 
 _DEFAULT_TIMEOUT_S = 30
+
+# Config _act satellite — see submit._FIELD_CONFIG_ACT for the rationale.
+_FIELD_CONFIG_ACT = (
+    "datawarehouse_intermediate.vault.sat_google_sheets__enrichment_field_config_act"
+)
 _STREAM_CHUNK_SIZE = 65536  # 64 KB chunks for streaming large JSONL downloads
 
 
@@ -42,7 +47,8 @@ def _azure_headers(api_key: str) -> dict[str, str]:
 
 def _fetch_active_batches(session: Any) -> list[dict[str, Any]]:
     rows = session.sql(
-        "SELECT batch_tracking_id, azure_batch_id, azure_input_file_id, prompt_version "
+        "SELECT batch_tracking_id, azure_batch_id, azure_input_file_id, "
+        "prompt_version, config_loaded_at "
         "FROM datalake.llm_enrichments.batch_tracking "
         "WHERE status IN ('SUBMITTED', 'IN_PROGRESS')"
     ).collect()
@@ -52,18 +58,23 @@ def _fetch_active_batches(session: Any) -> list[dict[str, Any]]:
             "azure_batch_id": row["AZURE_BATCH_ID"],
             "azure_input_file_id": row["AZURE_INPUT_FILE_ID"],
             "prompt_version": row["PROMPT_VERSION"],
+            "config_loaded_at": row["CONFIG_LOADED_AT"],
         }
         for row in rows
     ]
 
 
-def _fetch_field_configs(session: Any, prompt_version: str) -> list[FieldConfig]:
-    """Load enrichment field definitions for a prompt version from Snowflake."""
+def _fetch_field_configs(session: Any) -> list[FieldConfig]:
+    """Load enrichment field definitions from the datawarehouse _act satellite.
+
+    Matches submit._fetch_field_configs — the same _act table is the single
+    source of truth at submit and retrieve time. Per-batch reproducibility
+    relies on `batch_tracking.config_loaded_at` plus the `_hist` table.
+    """
     rows = session.sql(
         "SELECT field_name, field_type, allowed_values, min_value, max_value, "
         "field_description, is_nullable, display_order "
-        "FROM datalake.llm_enrichments.enrichment_field_config "
-        f"WHERE config_version = '{prompt_version}' "
+        f"FROM {_FIELD_CONFIG_ACT} "
         "ORDER BY display_order"
     ).collect()
     return [
@@ -104,23 +115,34 @@ def _download_output_file(azure_endpoint: str, api_key: str, output_file_id: str
     return b"".join(chunks).decode("utf-8")
 
 
-def _merge_enrichment_results(session: Any, results: list[EnrichmentResult]) -> int:
+def _merge_enrichment_results(
+    session: Any, results: list[EnrichmentResult], config_loaded_at: Any
+) -> int:
     """MERGE into enrichment_results on (conversation_id, prompt_version).
 
     parsed_fields is stored as a VARIANT (JSON object) so the schema can evolve
     without DDL changes.  Prevents silent duplicate rows when retrieve is called
     twice for the same completed batch.
+
+    `config_loaded_at` is propagated from the parent batch_tracking row so any
+    enrichment result can be traced back to the exact config snapshot that
+    produced it via the `_hist AS OF` query in docs/maintenance.md.
+
     Returns the number of rows merged.
     """
     if not results:
         return 0
+
+    config_loaded_at_sql = (
+        _sql_str(str(config_loaded_at)) if config_loaded_at is not None else "NULL"
+    )
 
     # PARSE_JSON cannot appear inside FROM VALUES — Snowflake rejects function
     # expressions in VALUES clauses. Keep the VALUES rows as plain string/bool
     # literals and apply PARSE_JSON in the outer SELECT.
     values = ", ".join(
         "({conv_id}, {pv}, {parsed}, {raw}, "
-        "{parse_error}, {parse_msg}, {failure_reason}, {tracking_id})".format(
+        "{parse_error}, {parse_msg}, {failure_reason}, {tracking_id}, {cla})".format(
             conv_id=_sql_str(r.conversation_id),
             pv=_sql_str(r.prompt_version),
             parsed=_sql_str(json.dumps(r.parsed_fields)),
@@ -129,6 +151,7 @@ def _merge_enrichment_results(session: Any, results: list[EnrichmentResult]) -> 
             parse_msg=_sql_str(r.parse_error_message),
             failure_reason=_sql_str(r.failure_reason),
             tracking_id=_sql_str(r.batch_tracking_id),
+            cla=config_loaded_at_sql,
         )
         for r in results
     )
@@ -144,7 +167,8 @@ def _merge_enrichment_results(session: Any, results: list[EnrichmentResult]) -> 
                 column5 AS parse_error,
                 column6 AS parse_error_message,
                 column7 AS failure_reason,
-                column8 AS batch_tracking_id
+                column8 AS batch_tracking_id,
+                column9 AS config_loaded_at
             FROM VALUES {values}
         ) AS source
         ON target.conversation_id = source.conversation_id
@@ -152,11 +176,11 @@ def _merge_enrichment_results(session: Any, results: list[EnrichmentResult]) -> 
         WHEN NOT MATCHED THEN INSERT (
             conversation_id, prompt_version, parsed_fields,
             raw_response, parse_error, parse_error_message,
-            failure_reason, batch_tracking_id
+            failure_reason, batch_tracking_id, config_loaded_at
         ) VALUES (
             source.conversation_id, source.prompt_version, source.parsed_fields,
             source.raw_response, source.parse_error, source.parse_error_message,
-            source.failure_reason, source.batch_tracking_id
+            source.failure_reason, source.batch_tracking_id, source.config_loaded_at
         )
     """).collect()
     return len(results)
@@ -260,10 +284,11 @@ def retrieve_batch(session: Any, config: RetrieveConfig) -> RetrieveResult:
         azure_batch_id = batch["azure_batch_id"]
         input_file_id = batch["azure_input_file_id"]
         prompt_version = batch["prompt_version"]
+        config_loaded_at = batch["config_loaded_at"]
 
         try:
             # 2 — load field configs and check Azure status
-            field_configs = _fetch_field_configs(session, prompt_version)
+            field_configs = _fetch_field_configs(session)
             azure_status = _check_azure_batch_status(
                 config.azure_endpoint, config.azure_api_key, azure_batch_id
             )
@@ -295,8 +320,10 @@ def retrieve_batch(session: Any, config: RetrieveConfig) -> RetrieveResult:
             for result in results:
                 result.prompt_version = prompt_version
 
-            # 6 — MERGE into enrichment_results (idempotent, parsed_fields as VARIANT)
-            rows_written += _merge_enrichment_results(session, results)
+            # 6 — MERGE into enrichment_results (idempotent, parsed_fields as VARIANT).
+            # config_loaded_at is propagated so each result row points at the
+            # config snapshot that produced it (reproduce via docs/maintenance.md).
+            rows_written += _merge_enrichment_results(session, results, config_loaded_at)
             parse_errors += sum(1 for r in results if r.parse_error)
             guardrail_failures += sum(1 for r in results if r.failure_reason == "guardrail")
 

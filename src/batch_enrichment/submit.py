@@ -20,6 +20,17 @@ logger = logging.getLogger(__name__)
 
 _DEFAULT_TIMEOUT_S = 30
 
+# Config _act satellites live in the datawarehouse Data Vault layer. The
+# database name is environment-dependent (dev_rob_intermediate / prd_intermediate
+# / etc.) — set via Snowflake session variable or substituted at deploy time.
+# Schema is `vault` for both. See ticket configure_config_sheet.
+_FIELD_CONFIG_ACT = (
+    "datawarehouse_intermediate.vault.sat_google_sheets__enrichment_field_config_act"
+)
+_CONTEXT_CONFIG_ACT = (
+    "datawarehouse_intermediate.vault.sat_google_sheets__enrichment_context_config_act"
+)
+
 
 def _parse_array(value: Any) -> list[Any] | None:
     """Snowflake ARRAY columns come back as JSON-encoded strings via Snowpark.
@@ -53,13 +64,17 @@ def _count_active_batches(session: Any) -> int:
     return int(rows[0]["N"])
 
 
-def _fetch_field_configs(session: Any, prompt_version: str) -> list[FieldConfig]:
-    """Load enrichment field definitions for a prompt version from Snowflake."""
+def _fetch_field_configs(session: Any) -> list[FieldConfig]:
+    """Load enrichment field definitions from the datawarehouse _act satellite.
+
+    The satellite always reflects the current sheet contents — versioning is
+    captured via SCD2 (load_datetime / valid_from). Historical reproducibility
+    goes through the `_hist` table (see docs/maintenance.md).
+    """
     rows = session.sql(
         "SELECT field_name, field_type, allowed_values, min_value, max_value, "
         "field_description, is_nullable, display_order "
-        "FROM datalake.llm_enrichments.enrichment_field_config "
-        f"WHERE config_version = '{prompt_version}' "
+        f"FROM {_FIELD_CONFIG_ACT} "
         "ORDER BY display_order"
     ).collect()
     return [
@@ -77,12 +92,11 @@ def _fetch_field_configs(session: Any, prompt_version: str) -> list[FieldConfig]
     ]
 
 
-def _fetch_context_configs(session: Any, prompt_version: str) -> list[ContextConfig]:
-    """Load context column definitions for a prompt version from Snowflake."""
+def _fetch_context_configs(session: Any) -> list[ContextConfig]:
+    """Load context column definitions from the datawarehouse _act satellite."""
     rows = session.sql(
         "SELECT column_name, display_label, value_description, display_order "
-        "FROM datalake.llm_enrichments.enrichment_context_config "
-        f"WHERE config_version = '{prompt_version}' "
+        f"FROM {_CONTEXT_CONFIG_ACT} "
         "ORDER BY display_order"
     ).collect()
     return [
@@ -94,6 +108,24 @@ def _fetch_context_configs(session: Any, prompt_version: str) -> list[ContextCon
         )
         for row in rows
     ]
+
+
+def _fetch_config_loaded_at(session: Any) -> str | None:
+    """Return GREATEST(MAX(load_datetime)) across the two config _act satellites.
+
+    Stamped on `batch_tracking.config_loaded_at` so any historical batch can
+    be reproduced by querying the `_hist` tables `AS OF` that timestamp.
+    """
+    rows = session.sql(
+        "SELECT GREATEST("
+        f"(SELECT MAX(load_datetime) FROM {_FIELD_CONFIG_ACT}), "
+        f"(SELECT MAX(load_datetime) FROM {_CONTEXT_CONFIG_ACT})"
+        ") AS config_loaded_at"
+    ).collect()
+    if not rows:
+        return None
+    value = rows[0]["CONFIG_LOADED_AT"]
+    return None if value is None else str(value)
 
 
 def _fetch_queue(
@@ -156,14 +188,16 @@ def _insert_tracking_row(
     input_file_id: str,
     row_count: int,
     config: SubmitConfig,
+    config_loaded_at: str | None,
 ) -> None:
+    config_loaded_at_sql = f"'{config_loaded_at}'" if config_loaded_at is not None else "NULL"
     session.sql(
         "INSERT INTO datalake.llm_enrichments.batch_tracking "
         "(batch_tracking_id, azure_batch_id, azure_input_file_id, status, row_count, "
-        " model_deployment, prompt_version, submitted_at) "
+        " model_deployment, prompt_version, config_loaded_at, submitted_at) "
         f"VALUES ('{tracking_id}', '{azure_batch_id}', '{input_file_id}', 'SUBMITTED', "
         f"{row_count}, '{config.model_deployment}', '{config.prompt_version}', "
-        "CURRENT_TIMESTAMP())"
+        f"{config_loaded_at_sql}, CURRENT_TIMESTAMP())"
     ).collect()
 
 
@@ -279,9 +313,11 @@ def submit_batch(session: Any, config: SubmitConfig) -> SubmitResult:
             error_message="max_active_batches reached",
         )
 
-    # 2 — load field and context configs for this prompt version
-    field_configs = _fetch_field_configs(session, config.prompt_version)
-    context_configs = _fetch_context_configs(session, config.prompt_version)
+    # 2 — load field and context configs from the datawarehouse _act satellites
+    # and capture the SCD2 timestamp so this batch can be reproduced later.
+    field_configs = _fetch_field_configs(session)
+    context_configs = _fetch_context_configs(session)
+    config_loaded_at = _fetch_config_loaded_at(session)
 
     # 3–4 — fetch queue; exit if empty
     transcripts = _fetch_queue(session, config.chunk_size, context_configs)
@@ -319,7 +355,13 @@ def submit_batch(session: Any, config: SubmitConfig) -> SubmitResult:
 
         # 9 — record tracking row
         _insert_tracking_row(
-            session, tracking_id, azure_batch_id, input_file_id, len(transcripts), config
+            session,
+            tracking_id,
+            azure_batch_id,
+            input_file_id,
+            len(transcripts),
+            config,
+            config_loaded_at,
         )
 
         # 10 — update mapping rows to SUBMITTED

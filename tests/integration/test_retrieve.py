@@ -68,7 +68,7 @@ class _FakeSession:
 
     def collect(self) -> list[_FakeRow]:
         q = self._last_query.upper()
-        if "ENRICHMENT_FIELD_CONFIG" in q:
+        if "SAT_GOOGLE_SHEETS__ENRICHMENT_FIELD_CONFIG_ACT" in q:
             return [_FakeRow(row) for row in _FIELD_CONFIG_ROWS]
         if "BATCH_TRACKING" in q and "SELECT" in q and "SUBMITTED" in q:
             return [
@@ -78,6 +78,7 @@ class _FakeSession:
                         "AZURE_BATCH_ID": b["azure_batch_id"],
                         "AZURE_INPUT_FILE_ID": b.get("azure_input_file_id", "file-in"),
                         "PROMPT_VERSION": b.get("prompt_version", "v1.0"),
+                        "CONFIG_LOADED_AT": b.get("config_loaded_at", "2026-05-18 12:34:56.000"),
                     }
                 )
                 for b in self.active_batches
@@ -496,3 +497,107 @@ class TestRetrieveNoBatches:
         assert result.batches_checked == 0
         assert result.batches_completed == 0
         assert result.rows_written == 0
+
+
+class TestConfigSourceMigration:
+    """Verifies retrieve.py reads field configs from the datawarehouse _act
+    satellite and propagates config_loaded_at to enrichment_results
+    (ticket configure_config_sheet)."""
+
+    @responses_lib.activate
+    def test_field_config_query_targets_act_satellite(self) -> None:
+        responses_lib.add(
+            responses_lib.GET,
+            "https://test.openai.azure.com/openai/batches/batch-xyz",
+            json=_azure_batch_status("completed"),
+            status=200,
+        )
+        responses_lib.add(
+            responses_lib.GET,
+            "https://test.openai.azure.com/openai/files/file-out/content",
+            body=_make_output_jsonl(1).encode(),
+            status=200,
+        )
+        responses_lib.add(
+            responses_lib.DELETE,
+            "https://test.openai.azure.com/openai/files/",
+            status=200,
+        )
+
+        session = _FakeSession(
+            active_batches=[{"batch_tracking_id": "tracking-001", "azure_batch_id": "batch-xyz"}]
+        )
+        retrieve_batch(session, make_config())
+
+        field_queries = [
+            q
+            for q in session.sql_log
+            if "SAT_GOOGLE_SHEETS__ENRICHMENT_FIELD_CONFIG_ACT" in q.upper()
+        ]
+        assert len(field_queries) >= 1, "retrieve did not query the _act satellite"
+        assert "CONFIG_VERSION" not in field_queries[0].upper()
+
+    def test_active_batches_query_selects_config_loaded_at(self) -> None:
+        session = _FakeSession(
+            active_batches=[{"batch_tracking_id": "tracking-001", "azure_batch_id": "batch-xyz"}]
+        )
+        # Stub Azure to a non-completed status so we exit the per-batch loop
+        # before any other queries — this isolates _fetch_active_batches.
+        with responses_lib.RequestsMock() as rsps:
+            rsps.add(
+                responses_lib.GET,
+                "https://test.openai.azure.com/openai/batches/batch-xyz",
+                json=_azure_batch_status("in_progress"),
+                status=200,
+            )
+            retrieve_batch(session, make_config())
+
+        select_queries = [
+            q
+            for q in session.sql_log
+            if "BATCH_TRACKING" in q.upper() and q.upper().lstrip().startswith("SELECT")
+        ]
+        assert len(select_queries) >= 1
+        assert "CONFIG_LOADED_AT" in select_queries[0].upper(), (
+            "_fetch_active_batches must select config_loaded_at so it can be "
+            "propagated to enrichment_results"
+        )
+
+    @responses_lib.activate
+    def test_merge_into_enrichment_results_includes_config_loaded_at(self) -> None:
+        responses_lib.add(
+            responses_lib.GET,
+            "https://test.openai.azure.com/openai/batches/batch-xyz",
+            json=_azure_batch_status("completed"),
+            status=200,
+        )
+        responses_lib.add(
+            responses_lib.GET,
+            "https://test.openai.azure.com/openai/files/file-out/content",
+            body=_make_output_jsonl(1).encode(),
+            status=200,
+        )
+        responses_lib.add(
+            responses_lib.DELETE,
+            "https://test.openai.azure.com/openai/files/",
+            status=200,
+        )
+
+        session = _FakeSession(
+            active_batches=[
+                {
+                    "batch_tracking_id": "tracking-001",
+                    "azure_batch_id": "batch-xyz",
+                    "config_loaded_at": "2026-05-18 12:34:56.000",
+                }
+            ]
+        )
+        retrieve_batch(session, make_config())
+
+        merge_queries = [q for q in session.sql_log if "MERGE INTO" in q.upper()]
+        assert len(merge_queries) >= 1
+        merge_sql = merge_queries[0]
+        assert "config_loaded_at" in merge_sql.lower(), (
+            "MERGE must carry config_loaded_at into enrichment_results"
+        )
+        assert "2026-05-18 12:34:56.000" in merge_sql

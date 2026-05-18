@@ -54,7 +54,9 @@ Batch LLM enrichment pipeline that classifies conversational transcripts at scal
 | `ENRICHMENT_QUEUE` | View | Unenriched rows eligible for submission |
 | `BATCH_TRACKING` | Table | Central state machine — every batch job |
 | `BATCH_ROW_MAPPING` | Table | Maps conversation_id → batch, prevents double-processing |
-| `ENRICHMENT_RESULTS` | Table | Parsed LLM output (sentiment, intent, topics, resolution, summary) |
+| `ENRICHMENT_RESULTS` | Table | Parsed LLM output (sentiment, intent, topics, resolution, summary); carries `config_loaded_at` for reproducibility |
+| `SAT_GOOGLE_SHEETS__ENRICHMENT_FIELD_CONFIG_ACT` | Data Vault satellite (datawarehouse repo) | Current LLM output-field config; source of truth at submit/retrieve time. History in the matching `_hist` table. |
+| `SAT_GOOGLE_SHEETS__ENRICHMENT_CONTEXT_CONFIG_ACT` | Data Vault satellite (datawarehouse repo) | Current context-column config; same SCD2 pattern. |
 | `SUBMIT_BATCH_TASK` | Snowflake Task | Submits on schedule (CRON `0 */2 * * * UTC`) |
 | `RETRIEVE_BATCH_TASK` | Snowflake Task | Polls and retrieves (CRON `*/30 * * * * UTC`) |
 | `SUBMIT_BATCH_SP` | Stored Procedure (Python) | Submission: chunking, JSONL, Azure Files + Batches API |
@@ -80,7 +82,11 @@ Terminal failure: `→ PERMANENTLY_FAILED`
 1. **Idempotency is non-negotiable.** Check `BATCH_TRACKING` for `IN_PROGRESS` batches before submitting new rows. Mark rows in `BATCH_ROW_MAPPING` before calling the Azure API — not after.
 2. **Write row mappings before the API call.** If the procedure crashes after the API call but before updating the tracking table, you get an orphaned Azure batch. The mapping table is the guard.
 3. **Handle per-row failures in completed batches.** `status=completed` in Azure does not mean every row succeeded. Parse `error` field per row; write successes and log failures separately.
-4. **Prompt versioning is mandatory.** Store `prompt_version` in `BATCH_TRACKING` and propagate to `ENRICHMENT_RESULTS`. Changing the prompt without versioning corrupts analytics.
+4. **Prompt and config versioning are mandatory and tracked separately.** Every batch stamps two pointers on `BATCH_TRACKING` and propagates them to `ENRICHMENT_RESULTS`:
+   - `prompt_version` — a code-managed label that versions only the prompt template string defined in this repo (the scaffold the config rows are interpolated into). Bump it manually whenever that template changes.
+   - `config_loaded_at` — `max(load_datetime)` across the `_act` config satellites at submit time. Captures which sheet snapshot the batch saw; reproduce the exact config via the `_hist AS OF` query in [docs/maintenance.md](docs/maintenance.md).
+
+   Changing the prompt without bumping `prompt_version`, or changing the config sheet without a new `load_datetime` reaching the satellite, corrupts analytics.
 5. **Stream, don't load.** Large output JSONL files (10k rows × 500 tokens) can exceed Snowpark memory. Stream in chunks rather than loading the full response into memory.
 6. **Exponential backoff for retries.** Use `next_retry_after` timestamp on `BATCH_TRACKING` rows. Never retry aggressively against a rate-limited endpoint.
 7. **Temperature=0, `response_format=json_object`.** Even then, LLMs can produce malformed JSON. Handle `PARSE_ERROR` gracefully — log raw output, don't block the batch.
@@ -169,6 +175,7 @@ halo-artefacts/{{namespace}}/{{ticket-id}}/
 |---|---|
 | `implementation_design_1.docx` | Architecture reference — update if pipeline design changes significantly |
 | `CLAUDE.md` (this file) | Run `/halo-init` when stack or key patterns change |
+| `docs/maintenance.md` | Update when the config reproducibility query changes (e.g. if the `_hist` satellite schema diverges from the documented columns) |
 
 ---
 

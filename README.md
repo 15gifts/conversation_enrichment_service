@@ -197,15 +197,11 @@ Run these in numbered order on first deployment and after schema changes.
 - Access to Snowflake with `ACCOUNTADMIN` (or equivalent) and `SECURITYADMIN` for the security objects
 - Azure OpenAI API key with Batch API access in the correct region, this is shared via 1password
 - `uv` installed (`pip install uv`)
-- CodeArtifact authentication (see `CLAUDE.local.md` for the script path)
 
 ### First-time setup
 
 ```bash
-# 1. Authenticate (replace path from CLAUDE.local.md)
-source ~/.zshrc && source "<authenticate_script_path>"
-
-# 2. Install dependencies
+# 1. Install dependencies (all packages resolve from PyPI)
 uv sync
 
 # 3. Run SQL scripts in order

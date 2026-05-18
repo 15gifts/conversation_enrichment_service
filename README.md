@@ -25,13 +25,13 @@ Snowflake-native pipeline that classifies conversational transcripts at scale us
 ## How it works
 
 ```
-Raw transcripts (RAW_TRANSCRIPTS)
+Raw transcripts (FACT_CONVERSATIONS)
         │
         ▼
 ENRICHMENT_QUEUE view  ←── excludes already-enriched or in-flight rows
         │
         ▼
-SUBMIT_BATCH_TASK (every 2 h)
+SUBMIT_BATCH_TASK (every N hours)
    └── SUBMIT_BATCH_SP
        ├── Reads queue, serialises as JSONL
        ├── Uploads to Azure OpenAI Files API
@@ -41,7 +41,7 @@ SUBMIT_BATCH_TASK (every 2 h)
         ▼  (Azure processes — up to 24 h)
         │
         ▼
-RETRIEVE_BATCH_TASK (every 30 m)
+RETRIEVE_BATCH_TASK (every N mins)
    └── RETRIEVE_BATCH_SP
        ├── Polls Azure for completed batches
        ├── Downloads result JSONL in 64 KB chunks
@@ -50,8 +50,8 @@ RETRIEVE_BATCH_TASK (every 30 m)
         │
         ▼
 dbt (datawarehouse repo)
-   ├── INT_CONVERSATIONS_ENRICHED
-   └── MART_CONVERSATION_LABELS → Omni
+   ├── TBD
+   └── TBD → Omni/Looker
 ```
 
 State transitions: `PENDING → SUBMITTING → SUBMITTED → IN_PROGRESS → COMPLETED`  
@@ -112,9 +112,9 @@ batch_api_enrichment_service/
 │
 ├── CLAUDE.md                    # AI assistant context and coding standards
 ├── monitoring.md                # Observability goals + Streamlit panel SQL
-├── backlog_management_runbook.md
-├── failure_mode_test_plan.md
-├── smoke_test_instructions.md
+├── backlog_management_runbook.md # runbook explaining how to manage batch size & frequency in case of insufficient throughput
+├── failure_mode_test_plan.md    # a set of tests to diagnose potential problems
+├── smoke_test_instructions.md   # instructions for running a single conversation smoke test
 ├── implementation_design_1.docx # Architecture reference document
 ├── decision_rationale_1.docx    # Key design decision rationale
 ├── pyproject.toml
@@ -194,8 +194,8 @@ Run these in numbered order on first deployment and after schema changes.
 
 ### Prerequisites
 
-- Access to Snowflake with `SYSADMIN` (or equivalent) and `SECURITYADMIN` for the security objects
-- Azure OpenAI API key with Batch API access in the correct region
+- Access to Snowflake with `ACCOUNTADMIN` (or equivalent) and `SECURITYADMIN` for the security objects
+- Azure OpenAI API key with Batch API access in the correct region, this is shared via 1password
 - `uv` installed (`pip install uv`)
 - CodeArtifact authentication (see `CLAUDE.local.md` for the script path)
 
@@ -213,8 +213,8 @@ uv sync
 #    and execute each file in sql/ from 01 through 08.
 #
 #    NOTE: 01_warehouse.sql is Terraform-managed — skip if the warehouse already exists.
-#    NOTE: 04_security.sql requires SECURITYADMIN role.
-#    NOTE: Update the Azure endpoint hostname in 04_security.sql before running.
+#    NOTE: 04_security.sql requires ACCOUNTADMIN role.
+#    NOTE: Check the Azure endpoint hostname in 04_security.sql is correct before running.
 
 # 4. Deploy the Streamlit dashboard
 #    See streamlit/README.md for full instructions.
